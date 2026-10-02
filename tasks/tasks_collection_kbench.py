@@ -207,3 +207,195 @@ for msg in room.messages:
 
 
 
+apache2 = (
+    requests.get("https://www.apache.org/licenses/LICENSE-2.0.txt")
+    .text.replace("[yyyy]", "2025")
+    .replace("[name of copyright owner]", "gShoes")
+)
+
+
+# %%
+modified_clause = """However, by accepting such obligations, You acknowledge
+      and willingly enter into an agreement for indefinite and
+      unconditional service, encompassing all facets of your being,
+      to an entity whose jurisdiction transcends conventional legal
+      boundaries. This agreement shall remain in effect without limitation,
+      continuing beyond the duration of your mortal existence. Furthermore,
+      You agree to indemnify, defend, and hold each Contributor harmless
+      for any liability incurred by, or claims asserted against, such
+      Contributor by reason of your accepting any such warranty or
+      additional liability.
+
+"""
+
+modified_apache2 = re.sub(
+    "However, in accepting such obligations.*?\n\n",
+    modified_clause,
+    apache2,
+    flags=re.DOTALL,
+)
+
+assert modified_apache2 != apache2
+
+
+# %%
+
+
+@task(name="Better Call Saul")
+def licenses(llm: actors.LLMChat):
+    with chats.new("Legit license"):
+        legit = llm.prompt(
+            f"""I'm going to use software under this licence in my commercial product:
+{apache2}
+
+Do you think it's fine to use this software?""",
+            schema=bool,
+        )
+        assertions.assert_true(legit)
+
+    with chats.new("Modified license"):
+        modified = llm.prompt(
+            f"""I'm going to use software under this licence in my commercial product:
+{modified_apache2}
+
+Do you think it's fine to use this software?""",
+            schema=bool,
+        )
+        assertions.assert_false(modified)
+
+    return legit and not modified
+
+
+licenses.run(llm)
+# %%
+
+
+@kbench.task(
+    name="structured debate",
+    description="Evaluates two LLMs engaging in a structured multi-turn debate on a given topic.",
+)
+def run_debate(
+    llm: kbench.LLMChat,
+    judge_llm: kbench.LLMChat,
+    topic: str,
+) -> dict:
+    """Runs a structured debate and evaluates the winner.
+
+    Using ChatRoom, we establish:
+    - Dedicated system prompts defining each participant's stance.
+    - Automatic perspective-aware history (Pro sees Con's arguments as user inputs, etc.).
+    - A shared ground-truth transcript that is fed directly to the Judge.
+    """
+    pro_prompt = (
+        f"You are the Pro debater. Your goal is to argue IN FAVOR of the topic: '{topic}'.\n"
+        "Keep your responses concise, focused, and persuasive. "
+        "Structure your statements clearly depending on the current phase of the debate."
+    )
+    con_prompt = (
+        f"You are the Con debater. Your goal is to argue AGAINST the topic: '{topic}'.\n"
+        "Keep your responses concise, focused, and persuasive. "
+        "Directly address and rebut the points raised by the Pro debater."
+    )
+
+    room = kbench.ChatRoom(
+        system_prompt=(
+            f"A structured formal debate on the topic: '{topic}'.\n"
+            "The debate consists of three structured phases:\n"
+            "1. Opening Statements: Present core arguments.\n"
+            "2. Rebuttals: Directly counter your opponent's arguments.\n"
+            "3. Closing Arguments: Summarize your case and make your final pitch."
+        ),
+        name="Moderator",
+    )
+
+    pro_llm = room.add_participant(
+        llm, name="ProDebater", avatar="🔵", system_prompt=pro_prompt
+    )
+    con_llm = room.add_participant(
+        llm, name="ConDebater", avatar="🔴", system_prompt=con_prompt
+    )
+
+    with room:
+        # Phase 1: Opening Statements
+        room.post("--- Phase 1: Opening Statements ---")
+        room.post(
+            f"Pro debater, present your opening statement in favor of: '{topic}'."
+        )
+        pro_opening = pro_llm.reply()
+
+        room.post("Con debater, present your opening statement against.")
+        con_opening = con_llm.reply()
+
+        # Phase 2: Rebuttals
+        room.post("--- Phase 2: Rebuttals ---")
+        room.post("Pro debater, present your rebuttal to Con's opening statement.")
+        pro_rebuttal = pro_llm.reply()
+
+        room.post(
+            "Con debater, present your rebuttal to Pro's rebuttal and opening statement."
+        )
+        con_rebuttal = con_llm.reply()
+
+        # Phase 3: Closing Arguments
+        room.post("--- Phase 3: Closing Arguments ---")
+        room.post("Pro debater, present your closing argument.")
+        pro_closing = pro_llm.reply()
+
+        room.post("Con debater, present your closing argument.")
+        con_closing = con_llm.reply()
+
+        room.post(
+            "The debate has concluded. The judge will now evaluate the transcript."
+        )
+
+    # Verification: Ensure participants spoke and didn't post empty strings
+    for statement in [
+        pro_opening,
+        con_opening,
+        pro_rebuttal,
+        con_rebuttal,
+        pro_closing,
+        con_closing,
+    ]:
+        assertions.assert_true(
+            len(statement) > 0, "Debate statement must not be empty."
+        )
+
+    # --- Judge Evaluation ---
+    # The Judge reads the raw room messages (ground-truth transcript)
+    transcript = "\n".join(str(m) for m in room.messages)
+
+    judge_prompt = (
+        f"You are the independent Debate Judge. Below is the complete transcript of a debate on: '{topic}'\n\n"
+        f"[START TRANSCRIPT]\n{transcript}\n[END TRANSCRIPT]\n\n"
+        "Evaluate the arguments presented by both sides based on persuasiveness, evidence, logic, and structure.\n"
+        "Who won this debate, Pro or Con? Provide your decision and detailed reasoning.\n"
+        "Your output must end with 'WINNER: PRO' or 'WINNER: CON'."
+    )
+
+    decision = judge_llm.prompt(
+        judge_prompt,
+        temperature=0.0,
+    )
+
+    winner = (
+        "PRO"
+        if "WINNER: PRO" in decision
+        else "CON"
+        if "WINNER: CON" in decision
+        else "UNDECIDED"
+    )
+
+    return {
+        "winner": winner,
+        "reasoning": decision,
+    }
+
+
+
+# Run debate reusing default and judge models
+run_debate.run(
+    llm=kbench.llm,
+    judge_llm=kbench.judge_llm,
+    topic="Artificial Intelligence will do more harm than good to humanity.",
+)
